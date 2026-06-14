@@ -143,29 +143,13 @@ const server = http.createServer(async (request, response) => {
     console.log('\nVIEW:', ref);
     try {
       const s = await getSession();
-      const html = '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Loading '+ref+'...</title>'
-        +'<style>body{font-family:Arial;text-align:center;padding:80px;background:#f0f8f0}'
-        +'.box{background:#fff;border:2px solid #4caf50;border-radius:10px;padding:40px;max-width:400px;margin:auto}'
-        +'h2{color:#2a7a2a}.ref{font-family:monospace;font-size:20px;font-weight:bold;background:#f0f0f0;padding:8px 16px;border-radius:4px;display:inline-block;margin:12px 0}'
-        +'.sp{width:36px;height:36px;border:3px solid #ddd;border-top-color:#4caf50;border-radius:50%;animation:spin .8s linear infinite;margin:0 auto 16px}'
-        +'@keyframes spin{to{transform:rotate(360deg)}}</style></head>'
-        +'<body><div class="box"><div class="sp"></div><h2>&#x1F3DB; TN Property Tax</h2>'
-        +'<div class="ref">'+ref+'</div><p style="color:#555">Loading...</p></div>'
-        +'<form id="gf" method="POST" action="https://'+GOVT+'/PT_CPPaymentDetails.aspx" style="display:none">'
-        +'<input name="__EVENTTARGET" value=""><input name="__EVENTARGUMENT" value=""><input name="__LASTFOCUS" value="">'
-        +'<input name="__VIEWSTATE" value="'+s.vs.replace(/"/g,'&quot;')+'">'
-        +'<input name="__VIEWSTATEGENERATOR" value="'+s.vsg+'"><input name="__VIEWSTATEENCRYPTED" value="">'
-        +'<input name="__EVENTVALIDATION" value="'+s.ev.replace(/"/g,'&quot;')+'">'
-        +'<input name="ctl00$alert_msg" value=""><input name="ctl00$PageContent$hdnref" value="">'
-        +'<input name="ctl00$PageContent$totamt_value" value=""><input name="ctl00$PageContent$HdPropertyTypeID" value="">'
-        +'<input name="ctl00$PageContent$rdbulb" value="0"><input name="ctl00$PageContent$txtRefNumber" value="'+ref+'">'
-        +'<input name="ctl00$PageContent$txt_OldNo" value=""><input name="ctl00$PageContent$TextBox1" value="">'
-        +'<input name="ctl00$PageContent$txt_RemittersName" value=""><input name="ctl00$PageContent$txtTransactionAmount" value="">'
-        +'<input type="submit" name="ctl00$PageContent$btnGetDetails" value="Search"></form>'
-        +'<script>setTimeout(function(){document.getElementById("gf").submit();},600);</script>'
-        +'</body></html>';
-      response.writeHead(200,{'Content-Type':'text/html; charset=utf-8'});
-      response.end(html);
+      const sd = await search(ref, s);
+      if (!sd.hdnref) throw new Error('Property not found: '+ref);
+      const payableAmt = es(sd.html, 'PageContent_lblpayamt') || '0';
+      console.log('  Owner:', es(sd.html,'PageContent_alblOwner'), 'Payable:', payableAmt);
+      const enc = encodeURIComponent(ref);
+      response.writeHead(302, {'Location': '/pay/'+enc+'?amount='+encodeURIComponent(payableAmt)});
+      response.end();
     } catch(e) { response.writeHead(500,{'Content-Type':'text/html'}); response.end('<h2>'+e.message+'</h2>'); }
     return;
   }
