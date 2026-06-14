@@ -3,361 +3,256 @@ const https = require('https');
 const PORT = process.env.PORT || 3000;
 const GOVT = 'tnurbanepay.tn.gov.in';
 
-// Generic HTTPS request
-function httpsReq(method, path, postData, headers) {
+function req(method, path, body, hdrs) {
   return new Promise((resolve, reject) => {
     const opts = {
       hostname: GOVT, port: 443, path, method,
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36',
-        'Accept-Language': 'en-US,en;q=0.9',
-        ...headers
-      }
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36', 'Accept-Language': 'en-US,en;q=0.9', ...hdrs }
     };
-    if (postData) opts.headers['Content-Length'] = Buffer.byteLength(postData);
-    const req = https.request(opts, res => {
+    if (body) opts.headers['Content-Length'] = Buffer.byteLength(body);
+    const r = https.request(opts, res => {
       const chunks = [];
       res.on('data', c => chunks.push(c));
-      res.on('end', () => resolve({ data: Buffer.concat(chunks), headers: res.headers, status: res.statusCode }));
+      res.on('end', () => resolve({ data: Buffer.concat(chunks).toString('utf8'), buf: Buffer.concat(chunks), headers: res.headers, status: res.statusCode }));
     });
-    req.on('error', reject);
-    if (postData) req.write(postData);
-    req.end();
+    r.on('error', reject);
+    if (body) r.write(body);
+    r.end();
   });
 }
 
-// Same as httpsReq but does NOT follow redirects
-function httpsReqNoRedirect(method, path, postData, reqHeaders) {
+function reqBuf(method, path, body, hdrs) {
   return new Promise((resolve, reject) => {
     const opts = {
       hostname: GOVT, port: 443, path, method,
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36',
-        'Accept-Language': 'en-US,en;q=0.9',
-        ...reqHeaders
-      }
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36', 'Accept-Language': 'en-US,en;q=0.9', ...hdrs }
     };
-    if (postData) opts.headers['Content-Length'] = Buffer.byteLength(postData);
-    const req = https.request(opts, res => {
+    if (body) opts.headers['Content-Length'] = body.length;
+    const r = https.request(opts, res => {
       const chunks = [];
       res.on('data', c => chunks.push(c));
-      res.on('end', () => resolve({ data: Buffer.concat(chunks), headers: res.headers, status: res.statusCode }));
+      res.on('end', () => resolve({ buf: Buffer.concat(chunks), data: Buffer.concat(chunks).toString('utf8'), headers: res.headers, status: res.statusCode }));
     });
-    req.on('error', reject);
-    if (postData) req.write(postData);
-    req.end();
+    r.on('error', reject);
+    if (body) r.write(body);
+    r.end();
   });
 }
 
 function ef(html, id) {
-  for (const pat of [
-    new RegExp(`id=["']${id}["'][^>]*value=["']([^"']*)["']`, 'i'),
-    new RegExp(`name=["']${id}["'][^>]*value=["']([^"']*)["']`, 'i'),
-  ]) { const m = html.match(pat); if (m) return m[1]; }
+  for (const p of [new RegExp(`id=["']${id}["'][^>]*value=["']([^"']*)["']`,'i'), new RegExp(`name=["']${id}["'][^>]*value=["']([^"']*)["']`,'i')]) { const m = html.match(p); if (m) return m[1]; }
   return '';
 }
-function es(html, id) {
-  const m = html.match(new RegExp(`id=["']${id}["'][^>]*>([^<]*)`, 'i'));
-  return m ? m[1].trim() : '';
-}
-function parseAjaxFields(ajax) {
-  const fields = {};
-  const re = /(\d+)\|hiddenField\|([^|]+)\|/g;
-  let m;
-  while ((m = re.exec(ajax)) !== null) {
-    fields[m[2]] = ajax.substring(m.index + m[0].length, m.index + m[0].length + parseInt(m[1]));
-  }
-  return fields;
+function es(html, id) { const m = html.match(new RegExp(`id=["']${id}["'][^>]*>([^<]*)`, 'i')); return m ? m[1].trim() : ''; }
+function parseAjax(ajax) {
+  const f = {}; const re = /(\d+)\|hiddenField\|([^|]+)\|/g; let m;
+  while ((m = re.exec(ajax)) !== null) f[m[2]] = ajax.substring(m.index + m[0].length, m.index + m[0].length + parseInt(m[1]));
+  return f;
 }
 
-// Session cache per browser cookie
-const sessions = {};
+const store = {}; // sessionKey → { cookieStr, confirmHtml }
 
-async function getGovtSession(browserCookie) {
-  const r = await httpsReq('GET', '/PT_CPPaymentDetails.aspx', null, {
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-    'Sec-Fetch-Dest': 'document', 'Sec-Fetch-Mode': 'navigate',
-    'Sec-Fetch-Site': 'none', 'Upgrade-Insecure-Requests': '1',
-    ...(browserCookie ? {'Cookie': browserCookie} : {})
+async function getSession() {
+  const r = await req('GET', '/PT_CPPaymentDetails.aspx', null, {
+    'Accept': 'text/html,application/xhtml+xml,*/*;q=0.8',
+    'Sec-Fetch-Dest': 'document', 'Sec-Fetch-Mode': 'navigate', 'Sec-Fetch-Site': 'none', 'Upgrade-Insecure-Requests': '1'
   });
-  const html = r.data.toString('utf8');
-  const setCookie = r.headers['set-cookie'] || [];
-  const cookieStr = setCookie.map(c => c.split(';')[0]).join('; ');
-  const sessionId = (cookieStr.match(/ASP\.NET_SessionId=([^;]+)/) || [])[1] || '';
-  const antiXsrf  = (cookieStr.match(/__AntiXsrfToken=([^;]+)/)   || [])[1] || '';
-  return {
-    sessionId, antiXsrf,
-    cookieStr: cookieStr || browserCookie || '',
-    setCookieHeaders: setCookie,
-    viewstate:       ef(html, '__VIEWSTATE'),
-    viewstateGen:    ef(html, '__VIEWSTATEGENERATOR') || 'A4D7941B',
-    eventValidation: ef(html, '__EVENTVALIDATION'),
-    html
-  };
+  const sc = (r.headers['set-cookie'] || []).map(c => c.split(';')[0]).join('; ');
+  return { cookieStr: sc, vs: ef(r.data,'__VIEWSTATE'), vsg: ef(r.data,'__VIEWSTATEGENERATOR')||'A4D7941B', ev: ef(r.data,'__EVENTVALIDATION') };
 }
 
-// Rewrite HTML for proxy: fix URLs, strip CSP, fix form actions
-function rewriteHtml(html, refToAutoSearch) {
+async function search(ref, s) {
+  const p = new URLSearchParams();
+  ['ctl00$alert_msg','ctl00$PageContent$hdnref','ctl00$PageContent$totamt_value','ctl00$PageContent$HdPropertyTypeID',
+   'ctl00$PageContent$txt_OldNo','ctl00$PageContent$TextBox1','ctl00$PageContent$txt_RemittersName',
+   'ctl00$PageContent$txtTransactionAmount','__EVENTTARGET','__EVENTARGUMENT','__LASTFOCUS','__VIEWSTATEENCRYPTED'].forEach(k=>p.set(k,''));
+  p.set('ctl00$ctl31','ctl00$PageContent$UpdatePanel4|ctl00$PageContent$btnGetDetails');
+  p.set('ctl00$PageContent$rdbulb','0'); p.set('ctl00$PageContent$txtRefNumber',ref);
+  p.set('__VIEWSTATE',s.vs); p.set('__VIEWSTATEGENERATOR',s.vsg); p.set('__EVENTVALIDATION',s.ev);
+  p.set('__ASYNCPOST','true'); p.set('ctl00$PageContent$btnGetDetails','Search');
+  const r = await req('POST', '/PT_CPPaymentDetails.aspx', p.toString(), {
+    'Content-Type':'application/x-www-form-urlencoded; charset=UTF-8','X-MicrosoftAjax':'Delta=true','X-Requested-With':'XMLHttpRequest',
+    'Origin':'https://'+GOVT,'Referer':'https://'+GOVT+'/PT_CPPaymentDetails.aspx','Cookie':s.cookieStr,
+    'Accept':'*/*','Sec-Fetch-Dest':'empty','Sec-Fetch-Mode':'cors','Sec-Fetch-Site':'same-origin'
+  });
+  const f = parseAjax(r.data);
+  return { html:r.data, hdnref:ef(r.data,'PageContent_hdnref'), totamt:ef(r.data,'PageContent_totamt_value'),
+    propTypeId:ef(r.data,'PageContent_HdPropertyTypeID')||'1',
+    newVS:f['__VIEWSTATE']||s.vs, newVSG:f['__VIEWSTATEGENERATOR']||s.vsg, newEV:f['__EVENTVALIDATION']||s.ev };
+}
+
+async function submit(ref, amount, s, sd) {
+  const p = new URLSearchParams();
+  ['ctl00$alert_msg','ctl00$PageContent$txt_OldNo','ctl00$PageContent$TextBox1',
+   'ctl00$PageContent$txt_RemittersName','__EVENTTARGET','__EVENTARGUMENT','__LASTFOCUS','__VIEWSTATEENCRYPTED'].forEach(k=>p.set(k,''));
+  p.set('ctl00$ctl31','ctl00$PageContent$UpdatePanel1|ctl00$PageContent$btnSubmit');
+  p.set('ctl00$PageContent$hdnref',sd.hdnref); p.set('ctl00$PageContent$totamt_value',sd.totamt);
+  p.set('ctl00$PageContent$HdPropertyTypeID',sd.propTypeId); p.set('ctl00$PageContent$rdbulb','0');
+  p.set('ctl00$PageContent$txtRefNumber',ref); p.set('ctl00$PageContent$txtTransactionAmount',String(amount));
+  p.set('__VIEWSTATE',sd.newVS); p.set('__VIEWSTATEGENERATOR',sd.newVSG); p.set('__EVENTVALIDATION',sd.newEV);
+  p.set('__ASYNCPOST','true'); p.set('ctl00$PageContent$btnSubmit','Submit');
+  return req('POST', '/PT_CPPaymentDetails.aspx', p.toString(), {
+    'Content-Type':'application/x-www-form-urlencoded; charset=UTF-8','X-MicrosoftAjax':'Delta=true','X-Requested-With':'XMLHttpRequest',
+    'Origin':'https://'+GOVT,'Referer':'https://'+GOVT+'/PT_CPPaymentDetails.aspx','Cookie':s.cookieStr,
+    'Accept':'*/*','Sec-Fetch-Dest':'empty','Sec-Fetch-Mode':'cors','Sec-Fetch-Site':'same-origin'
+  });
+}
+
+function fixHtml(html, sessionKey) {
+  const base = 'https://'+GOVT;
   let out = html
-    // Fix asset URLs
-    .replace(/src="(?!http|data:|\/\/)(\.\/)?/g, 'src="https://' + GOVT + '/')
-    .replace(/href="(?!http|#|javascript|data:|\/\/)(\.\/)?(?!PT_CP)/g, 'href="https://' + GOVT + '/')
-    // Fix form action to point back to our proxy
-    .replace(/action="(?:\.\/)?PT_CPPaymentDetails\.aspx"/g, 'action="/pt"')
-    .replace(/action="(?:\.\/)?ConformationResponce\.aspx"/g, 'action="/confirm"');
-
-  // Auto-fill and search if ref provided
-  if (refToAutoSearch) {
-    const autoFill = '<script>'
-      + 'window.addEventListener("load",function(){'
-      + '  var inp = document.getElementById("PageContent_txtRefNumber");'
-      + '  if(inp){ inp.value=' + JSON.stringify(refToAutoSearch) + '; }'
-      + '  var btn = document.getElementById("PageContent_btnGetDetails");'
-      + '  if(btn){ setTimeout(function(){ btn.click(); },300); }'
-      + '});'
-      + '</script>';
-    out = out.replace('</head>', autoFill + '</head>');
+    .replace(/src=["']\.\/([^"']+)["']/g,'src="'+base+'/$1"')
+    .replace(/href=["']\.\/([^"']+)["']/g,'href="'+base+'/$1"')
+    .replace(/src=["'](?!http|data:|\/)([^"']+)["']/g,'src="'+base+'/$1"');
+  // Point form to our confirm-submit
+  out = out.replace(/action=["'][^"']*ConformationResponce\.aspx[^"']*["']/gi,'action="/confirm-submit"');
+  // Proxy captcha
+  if (sessionKey) {
+    out = out.replace(/src=["'][^"']*GenerateCaptcha\.aspx[^"']*["']/g,'src="/captcha/'+sessionKey+'"');
+    out = out.replace(/id="imgCaptcha"[^>]*src="[^"]*"/g,'id="imgCaptcha" src="/captcha/'+sessionKey+'"');
+    out = out.replace(/<input[^>]*id="idview"[^>]*>/g,
+      '<button type="button" onclick="document.getElementById(\'imgCaptcha\').src=\'/captcha/'+sessionKey+'?r=\'+Date.now()" style="border:2px solid green;border-radius:20px;background:#fff;cursor:pointer;padding:2px 8px;margin-left:4px">&#x1F504;</button>');
   }
-
   return out;
 }
 
-// Cookie jar per session
-const cookieJar = {};
+const server = http.createServer(async (request, response) => {
+  response.setHeader('Access-Control-Allow-Origin','*');
+  if (request.method === 'OPTIONS') { response.writeHead(200); response.end(); return; }
+  const u = new URL(request.url, 'http://localhost');
+  const p = u.pathname;
 
-function getProxyCookie(req) {
-  const c = req.headers['cookie'] || '';
-  const m = c.match(/tn_sid=([^;]+)/);
-  return m ? decodeURIComponent(m[1]) : null;
-}
-
-function buildSetCookie(govtCookieStr, sessionId) {
-  // Store govt cookie mapped to a proxy session id
-  const proxyId = sessionId || Math.random().toString(36).slice(2);
-  cookieJar[proxyId] = govtCookieStr;
-  return { proxyId, setCookie: 'tn_sid=' + encodeURIComponent(proxyId) + '; Path=/; HttpOnly' };
-}
-
-function getGovtCookie(req) {
-  const proxyId = getProxyCookie(req);
-  return proxyId ? (cookieJar[proxyId] || '') : '';
-}
-
-// ─── SERVER ──────────────────────────────────────────────────────────────────
-const server = http.createServer(async (req, res) => {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  if (req.method === 'OPTIONS') { res.writeHead(200); res.end(); return; }
-
-  const url = new URL(req.url, 'http://localhost');
-  const pathname = url.pathname;
-
-  // ── /view/:ref  → load PT page with auto-search ──────────────────────────
-  if (req.method === 'GET' && pathname.startsWith('/view/')) {
-    const ref = decodeURIComponent(pathname.replace('/view/', ''));
-    console.log('\n=== VIEW:', ref);
+  // Captcha proxy
+  if (p.startsWith('/captcha/')) {
+    const key = p.slice(9);
+    const s = store[key];
+    if (!s) { response.writeHead(404); response.end('expired'); return; }
     try {
-      const govtCookie = getGovtCookie(req);
-      const session = await getGovtSession(govtCookie);
-      // Store session cookie for subsequent requests
-      const { proxyId, setCookie } = buildSetCookie(session.cookieStr, null);
-      cookieJar[proxyId] = session.cookieStr;
-      const html = rewriteHtml(session.html, ref);
-      res.writeHead(200, {
-        'Content-Type': 'text/html; charset=utf-8',
-        'Set-Cookie': setCookie
+      const r = await reqBuf('GET', '/GenerateCaptcha.aspx?'+Date.now(), null, {
+        'Cookie':s.cookieStr,'Referer':'https://'+GOVT+'/ConformationResponce.aspx','Accept':'image/*'
       });
-      res.end(html);
-    } catch(e) {
-      console.error(e.message);
-      res.writeHead(500, {'Content-Type':'text/html'});
-      res.end('<h2>Error: ' + e.message + '</h2>');
-    }
+      response.writeHead(200,{'Content-Type':r.headers['content-type']||'image/png','Cache-Control':'no-store'});
+      response.end(r.buf);
+    } catch(e) { response.writeHead(500); response.end(''); }
     return;
   }
 
-  // ── /pt  → proxy PT_CPPaymentDetails.aspx POST ───────────────────────────
-  if (pathname === '/pt' || pathname === '/confirm') {
-    let body = Buffer.alloc(0);
-    req.on('data', c => { body = Buffer.concat([body, c]); });
-    req.on('end', async () => {
-      const govtPath = pathname === '/confirm' ? '/ConformationResponce.aspx' : '/PT_CPPaymentDetails.aspx';
-      const govtCookie = getGovtCookie(req);
-      console.log('Proxy POST:', govtPath, 'cookie:', govtCookie.substring(0,30));
+  // GET /view/:ref — auto-search on govt site
+  if (request.method === 'GET' && p.startsWith('/view/')) {
+    const ref = decodeURIComponent(p.slice(6));
+    console.log('\nVIEW:', ref);
+    try {
+      const s = await getSession();
+      const html = '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Loading '+ref+'...</title>'
+        +'<style>body{font-family:Arial;text-align:center;padding:80px;background:#f0f8f0}'
+        +'.box{background:#fff;border:2px solid #4caf50;border-radius:10px;padding:40px;max-width:400px;margin:auto}'
+        +'h2{color:#2a7a2a}.ref{font-family:monospace;font-size:20px;font-weight:bold;background:#f0f0f0;padding:8px 16px;border-radius:4px;display:inline-block;margin:12px 0}'
+        +'.sp{width:36px;height:36px;border:3px solid #ddd;border-top-color:#4caf50;border-radius:50%;animation:spin .8s linear infinite;margin:0 auto 16px}'
+        +'@keyframes spin{to{transform:rotate(360deg)}}</style></head>'
+        +'<body><div class="box"><div class="sp"></div><h2>&#x1F3DB; TN Property Tax</h2>'
+        +'<div class="ref">'+ref+'</div><p style="color:#555">Loading...</p></div>'
+        +'<form id="gf" method="POST" action="https://'+GOVT+'/PT_CPPaymentDetails.aspx" style="display:none">'
+        +'<input name="__EVENTTARGET" value=""><input name="__EVENTARGUMENT" value=""><input name="__LASTFOCUS" value="">'
+        +'<input name="__VIEWSTATE" value="'+s.vs.replace(/"/g,'&quot;')+'">'
+        +'<input name="__VIEWSTATEGENERATOR" value="'+s.vsg+'"><input name="__VIEWSTATEENCRYPTED" value="">'
+        +'<input name="__EVENTVALIDATION" value="'+s.ev.replace(/"/g,'&quot;')+'">'
+        +'<input name="ctl00$alert_msg" value=""><input name="ctl00$PageContent$hdnref" value="">'
+        +'<input name="ctl00$PageContent$totamt_value" value=""><input name="ctl00$PageContent$HdPropertyTypeID" value="">'
+        +'<input name="ctl00$PageContent$rdbulb" value="0"><input name="ctl00$PageContent$txtRefNumber" value="'+ref+'">'
+        +'<input name="ctl00$PageContent$txt_OldNo" value=""><input name="ctl00$PageContent$TextBox1" value="">'
+        +'<input name="ctl00$PageContent$txt_RemittersName" value=""><input name="ctl00$PageContent$txtTransactionAmount" value="">'
+        +'<input type="submit" name="ctl00$PageContent$btnGetDetails" value="Search"></form>'
+        +'<script>setTimeout(function(){document.getElementById("gf").submit();},600);</script>'
+        +'</body></html>';
+      response.writeHead(200,{'Content-Type':'text/html; charset=utf-8'});
+      response.end(html);
+    } catch(e) { response.writeHead(500,{'Content-Type':'text/html'}); response.end('<h2>'+e.message+'</h2>'); }
+    return;
+  }
+
+  // GET /pay/:ref?amount=X — submit & show confirmation page
+  if (request.method === 'GET' && p.startsWith('/pay/')) {
+    const ref = decodeURIComponent(p.slice(5));
+    const amount = u.searchParams.get('amount') || '0';
+    console.log('\nPAY:', ref, amount);
+    try {
+      const s = await getSession();
+      const sd = await search(ref, s);
+      if (!sd.hdnref) throw new Error('Property not found: '+ref);
+      const submitR = await submit(ref, amount, s, sd);
+      console.log('  Submit:', submitR.status, submitR.data.substring(0,100));
+      const confirmR = await req('GET', '/ConformationResponce.aspx', null, {
+        'Accept':'text/html,application/xhtml+xml,*/*;q=0.8',
+        'Referer':'https://'+GOVT+'/PT_CPPaymentDetails.aspx','Cookie':s.cookieStr,
+        'Sec-Fetch-Dest':'document','Sec-Fetch-Mode':'navigate','Sec-Fetch-Site':'same-origin','Upgrade-Insecure-Requests':'1'
+      });
+      const sessionKey = (s.cookieStr.match(/ASP\.NET_SessionId=([^;]+)/)||['','x'])[1].substring(0,16);
+      store[sessionKey] = s;
+      setTimeout(()=>delete store[sessionKey], 15*60*1000);
+      const fixed = fixHtml(confirmR.data, sessionKey);
+      response.writeHead(200,{'Content-Type':'text/html; charset=utf-8','Set-Cookie':'tnp='+sessionKey+'; Path=/; HttpOnly; SameSite=Lax'});
+      response.end(fixed);
+    } catch(e) { console.error(e.message); response.writeHead(500,{'Content-Type':'text/html'}); response.end('<h2>'+e.message+'</h2><a href="/">Back</a>'); }
+    return;
+  }
+
+  // POST /confirm-submit — forward Confirm button POST to govt with stored session
+  if (request.method === 'POST' && p === '/confirm-submit') {
+    const chunks = [];
+    request.on('data', c => chunks.push(Buffer.from(c)));
+    request.on('end', async () => {
+      const body = Buffer.concat(chunks);
+      const ck = request.headers['cookie'] || '';
+      const km = ck.match(/tnp=([^;]+)/);
+      const s = km ? store[km[1]] : null;
+      if (!s) { response.writeHead(400,'text/html'); response.end('<h2>Session expired. <a href="/">Try again</a></h2>'); return; }
+      console.log('\nCONFIRM-SUBMIT session:', s.cookieStr.substring(0,60));
       try {
-        // Use followRedirects=false so we can handle 302 → BillDesk redirect
-        const r = await httpsReqNoRedirect(req.method, govtPath, body, {
-          'Content-Type': req.headers['content-type'] || 'application/x-www-form-urlencoded',
-          'Cookie': govtCookie,
-          'Origin': 'https://' + GOVT,
-          'Referer': 'https://' + GOVT + (pathname === '/confirm' ? '/ConformationResponce.aspx' : '/PT_CPPaymentDetails.aspx'),
-          'X-MicrosoftAjax': req.headers['x-microsoftajax'] || '',
-          'X-Requested-With': req.headers['x-requested-with'] || '',
-          'Accept': req.headers['accept'] || 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-          'Sec-Fetch-Dest': 'document', 'Sec-Fetch-Mode': 'navigate', 'Sec-Fetch-Site': 'same-origin',
-          'Upgrade-Insecure-Requests': '1',
+        const r = await reqBuf('POST', '/ConformationResponce.aspx', body, {
+          'Content-Type': request.headers['content-type']||'application/x-www-form-urlencoded',
+          'Cookie': s.cookieStr,
+          'Origin': 'https://'+GOVT,
+          'Referer': 'https://'+GOVT+'/ConformationResponce.aspx',
+          'Accept': 'text/html,application/xhtml+xml,*/*;q=0.8',
+          'Sec-Fetch-Dest':'document','Sec-Fetch-Mode':'navigate','Sec-Fetch-Site':'same-origin','Upgrade-Insecure-Requests':'1'
         });
-
-        // Update stored cookie
-        const newCookies = (r.headers['set-cookie'] || []).map(c => c.split(';')[0]).join('; ');
-        if (newCookies) {
-          const proxyId = getProxyCookie(req);
-          if (proxyId) cookieJar[proxyId] = mergeSetCookies(r.headers['set-cookie'] || [], govtCookie);
-        }
-
-        // 302 redirect → could be BillDesk or another page
-        if (r.status === 302 || r.status === 301) {
-          const location = r.headers['location'] || '';
-          console.log('Redirect to:', location);
-          if (location.includes('billdesk.com') || location.includes('pay.') || location.startsWith('http')) {
-            // External redirect (BillDesk) — send browser directly there
-            res.writeHead(302, { 'Location': location });
-            res.end();
-          } else {
-            // Internal redirect — proxy it
-            res.writeHead(302, { 'Location': location });
-            res.end();
-          }
+        console.log('  Confirm status:', r.status, 'Location:', r.headers['location']||'none');
+        if ((r.status===302||r.status===301) && r.headers['location']) {
+          // BillDesk or external payment redirect — send browser there
+          response.writeHead(302,{'Location': r.headers['location']});
+          response.end();
           return;
         }
-
-        const ct = r.headers['content-type'] || '';
-        const responseText = r.data.toString('utf8');
-
-        if (ct.includes('text/html')) {
-          const html = rewriteHtml(responseText, null);
-          res.writeHead(r.status, {'Content-Type': 'text/html; charset=utf-8'});
-          res.end(html);
-        } else {
-          res.writeHead(r.status, {'Content-Type': ct});
-          res.end(r.data);
-        }
-      } catch(e) {
-        console.error(e.message);
-        res.writeHead(500); res.end('Proxy error: ' + e.message);
-      }
+        const html = fixHtml(r.data, null);
+        response.writeHead(r.status,{'Content-Type':'text/html; charset=utf-8'});
+        response.end(html);
+      } catch(e) { console.error(e); response.writeHead(500); response.end(e.message); }
     });
     return;
   }
 
-  // ── /fetch-property  → JSON API for lookup tool ──────────────────────────
-  if (req.method === 'POST' && pathname === '/fetch-property') {
-    let body = '';
-    req.on('data', c => body += c);
-    req.on('end', async () => {
-      let ref;
-      try { ref = JSON.parse(body).ref; } catch(e) { res.writeHead(400); res.end(JSON.stringify({error:'Send: {"ref":"082/001/900540"}'})); return; }
-      try {
-        const session = await getGovtSession('');
-        const p = new URLSearchParams();
-        p.set('ctl00$ctl31', 'ctl00$PageContent$UpdatePanel4|ctl00$PageContent$btnGetDetails');
-        ['ctl00$alert_msg','ctl00$PageContent$hdnref','ctl00$PageContent$totamt_value',
-         'ctl00$PageContent$HdPropertyTypeID','ctl00$PageContent$txt_OldNo',
-         'ctl00$PageContent$TextBox1','ctl00$PageContent$txt_RemittersName',
-         'ctl00$PageContent$txtTransactionAmount','__EVENTTARGET','__EVENTARGUMENT','__LASTFOCUS',
-         '__VIEWSTATEENCRYPTED'].forEach(k => p.set(k, ''));
-        p.set('ctl00$PageContent$rdbulb', '0');
-        p.set('ctl00$PageContent$txtRefNumber', ref);
-        p.set('__VIEWSTATE', session.viewstate);
-        p.set('__VIEWSTATEGENERATOR', session.viewstateGen);
-        p.set('__EVENTVALIDATION', session.eventValidation);
-        p.set('__ASYNCPOST', 'true');
-        p.set('ctl00$PageContent$btnGetDetails', 'Search');
-        const sr = await httpsReq('POST', '/PT_CPPaymentDetails.aspx', p.toString(), {
-          'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-          'X-MicrosoftAjax': 'Delta=true', 'X-Requested-With': 'XMLHttpRequest',
-          'Origin': 'https://' + GOVT, 'Referer': 'https://' + GOVT + '/PT_CPPaymentDetails.aspx',
-          'Cookie': session.cookieStr, 'Accept': '*/*',
-          'Sec-Fetch-Dest': 'empty', 'Sec-Fetch-Mode': 'cors', 'Sec-Fetch-Site': 'same-origin',
-        });
-        const html = sr.data.toString('utf8');
-        const fields = parseAjaxFields(html);
-        const sp = id => es(html, id);
-        const hdnref = ef(html, 'PageContent_hdnref');
-        const payableAmt = sp('PageContent_lblpayamt');
-        const ownerName = sp('PageContent_alblOwner');
-        const encoded = encodeURIComponent(ref);
-        const result = {
-          ref, found: ownerName !== '',
-          assessee: {
-            ownerName, ownerNameTamil: sp('PageContent_alblOwnerintamil'),
-            assessmentNo: sp('PageContent_alblAssesmentnoText'),
-            oldAssessmentNo: sp('PageContent_alblOldAssesmentnoText'),
-            doorNo: sp('PageContent_alblDoorNo'), street: sp('PageContent_alblStreet1'),
-            city: sp('PageContent_alborganization'), pincode: sp('PageContent_alblPincode'),
-            doorNoTamil: sp('PageContent_alblDoorNot'), streetTamil: sp('PageContent_alblStreet1ll'),
-            cityTamil: sp('PageContent_alborganizationLL'), pincodeTamil: sp('PageContent_alblPincodell'),
-            assessmentType: sp('PageContent_lblasstype'), zone: sp('PageContent_lblZoneText'),
-            ward: sp('PageContent_lblWardText'), annualRentalValue: sp('PageContent_albl_netannualvalue'),
-            halfYearlyTax: sp('PageContent_albl_halfyeartax'), assessmentStatus: sp('PageContent_lblflag'),
-            usage: sp('PageContent_lblusage'), totalAreaSqft: sp('PageContent_Label21'),
-          },
-          balanceAmt: sp('PageContent_lbl_balanceamt_view'),
-          advanceAmt: sp('PageContent_lbl_advanceamt_view'),
-          payableAmt,
-          payments: [],
-          dues: [],
-          dueTotal: {},
-          _urls: {
-            view: 'http://localhost:' + PORT + '/view/' + encoded,
-          }
-        };
-        // Parse last payments
-        const payTbl = html.match(/<table[^>]*id="PageContent_gvLastPaymentDet"[^>]*>([\s\S]*?)<\/table>/i);
-        if (payTbl) {
-          (payTbl[1].match(/<tr(?!.*Gridcolor)[^>]*>([\s\S]*?)<\/tr>/gi)||[]).forEach(row => {
-            const cells = (row.match(/<td[^>]*>([\s\S]*?)<\/td>/gi)||[]).map(c=>c.replace(/<[^>]+>/g,'').replace(/&nbsp;/g,'').trim());
-            if (cells.length >= 8 && cells[1]) result.payments.push({sno:cells[0],receipt:cells[1],assessmentNo:cells[2],oldAssessmentNo:cells[3],receiptDate:cells[4],amount:cells[5],usage:cells[6],status:cells[7]});
-          });
-        }
-        // Parse dues
-        const dueTbl = html.match(/<table[^>]*id="PageContent_gvpayment"[^>]*>([\s\S]*?)<\/table>/i);
-        if (dueTbl) {
-          (dueTbl[1].match(/<tr[^>]*>([\s\S]*?)<\/tr>/gi)||[]).forEach(row => {
-            if (row.includes('Gridcolor')) return;
-            const cells = (row.match(/<td[^>]*>([\s\S]*?)<\/td>/gi)||[]).map(c=>c.replace(/<[^>]+>/g,'').replace(/&nbsp;/g,'').trim());
-            if (cells.length >= 12 && cells[1] && cells[1] !== 'Total')
-              result.dues.push({sno:cells[0],period:cells[1],taxDemand:cells[2],penaltyDemand:cells[3],taxCollected:cells[4],penaltyCollected:cells[5],taxBalance:cells[6],balancePenalty:cells[7],totalBalance:cells[8],delayPenalty:cells[9],incentive:cells[10],cumulativeBalance:cells[11]});
-            else if (cells[1]==='Total') result.dueTotal={taxDemand:cells[2],penaltyDemand:cells[3],taxCollected:cells[4],penaltyCollected:cells[5],taxBalance:cells[6],balancePenalty:cells[7],totalBalance:cells[8]};
-          });
-        }
-        console.log('✓ Owner:"' + ownerName + '" payable:' + payableAmt);
-        res.writeHead(200, {'Content-Type':'application/json'});
-        res.end(JSON.stringify(result));
-      } catch(e) { console.error(e.message); res.writeHead(500); res.end(JSON.stringify({error:e.message})); }
-    });
-    return;
-  }
-
-  // ── Proxy all other govt assets (CSS, JS, images) ────────────────────────
-  if (pathname.match(/\.(css|js|png|jpg|gif|ico|axd|aspx)/) && !pathname.startsWith('/view') && !pathname.startsWith('/fetch')) {
-    const govtCookie = getGovtCookie(req);
-    try {
-      const r = await httpsReq('GET', pathname + (url.search || ''), null, {
-        'Accept': '*/*',
-        'Cookie': govtCookie,
-        'Referer': 'https://' + GOVT + '/',
-      });
-      const ct = r.headers['content-type'] || 'application/octet-stream';
-      res.writeHead(r.status, {'Content-Type': ct, 'Cache-Control': 'public, max-age=60'});
-      res.end(r.data);
-    } catch(e) { res.writeHead(404); res.end(''); }
-    return;
-  }
-
-  // ── Default ───────────────────────────────────────────────────────────────
-  let body = '';
-  req.on('data', c => body += c);
-  req.on('end', () => {
-    res.writeHead(200, {'Content-Type':'text/html'});
-    res.end('<html><body style="font-family:Arial;padding:40px">'
-      + '<h2>TN Property Tax Proxy</h2><ul>'
-      + '<li><a href="/view/082%2F001%2F900540">/view/082%2F001%2F900540</a> — Property page</li>'
-      + '<li>POST /fetch-property {"ref":"082/001/900540"} — JSON data</li>'
-      + '</ul></body></html>');
+  // Home
+  const b = [];
+  request.on('data', c => b.push(c));
+  request.on('end', () => {
+    response.writeHead(200,{'Content-Type':'text/html; charset=utf-8'});
+    response.end(`<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>TN Property Tax</title>
+<style>*{box-sizing:border-box;margin:0;padding:0}body{font-family:Arial;background:#1b5e20;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:16px}
+.card{background:#fff;border-radius:12px;max-width:420px;width:100%;overflow:hidden;box-shadow:0 8px 32px rgba(0,0,0,.3)}
+.hdr{background:#2e7d32;padding:20px;text-align:center;color:#fff}.hdr h1{font-size:18px;margin-bottom:4px}.hdr p{font-size:12px;opacity:.8}
+.body{padding:24px}label{font-size:13px;color:#555;font-weight:bold;display:block;margin-bottom:8px}
+input{width:100%;border:2px solid #e0e0e0;padding:12px;font-family:monospace;font-size:16px;border-radius:8px;outline:none}input:focus{border-color:#4caf50}
+.btn{width:100%;background:#2e7d32;color:#fff;border:none;padding:13px;font-size:15px;font-weight:bold;border-radius:8px;cursor:pointer;margin-top:10px}.btn:hover{background:#1b5e20}</style></head>
+<body><div class="card"><div class="hdr"><h1>&#x1F3DB; TN Property Tax</h1><p>Commissionerate of Municipal Administration</p></div>
+<div class="body"><label>Assessment Number</label><input type="text" id="r" placeholder="082/001/900540"/>
+<button class="btn" onclick="go()">View &amp; Pay &#x2192;</button></div></div>
+<script>function go(){var r=document.getElementById('r').value.trim();if(r)window.location.href='/view/'+encodeURIComponent(r);}
+document.getElementById('r').addEventListener('keydown',function(e){if(e.key==='Enter')go();});</script></body></html>`);
   });
 });
 
 server.listen(PORT, () => {
-  console.log('\n✅ TN Property Tax Reverse Proxy → http://localhost:' + PORT);
-  console.log('  View: http://localhost:' + PORT + '/view/082%2F001%2F900540');
+  console.log('\n✅ TN Property Tax → http://localhost:' + PORT);
+  console.log('  /view/082%2F001%2F900540  — view property');
+  console.log('  /pay/082%2F001%2F900540?amount=1011  — payment page');
 });
