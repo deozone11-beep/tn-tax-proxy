@@ -1,0 +1,12 @@
+{
+  "name": "tn-property-tax-proxy",
+  "version": "1.0.0",
+  "description": "TN Urban ePay Property Tax Proxy",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
