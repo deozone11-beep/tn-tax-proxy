@@ -55,7 +55,7 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'GET' && pathname.startsWith('/view/')) {
     const ref = decodeURIComponent(pathname.slice(6));
     console.log('VIEW:', ref);
-
+ 
     // Serve a page that:
     // 1. Opens actual govt site in same tab
     // 2. Passes ref via sessionStorage (same origin won't work cross-domain)
